@@ -38,6 +38,14 @@ var conns = {};
 var myImgData = '';
 var fallbackImg = '';
 
+var iceCfg = {
+  iceServers: [
+    { urls: 'stun:stun.miwifi.com:3478' },
+    { urls: 'stun:stun.chat.bilibili.com:3478' },
+    { urls: 'stun:stun.qq.com:3478' }
+  ]
+};
+
 var savedName = localStorage.getItem('bb_name');
 if (savedName) { myName = savedName; nameInput.value = savedName; }
 
@@ -207,6 +215,16 @@ function ensureOther(id, info) {
   return p;
 }
 
+function posPayload() {
+  return {
+    t: 'pos',
+    xr: me.x / W,
+    yr: me.y / H,
+    n: myName,
+    u: myNum
+  };
+}
+
 me = newPlayer();
 me.num = 1;
 me.customName = myName;
@@ -267,7 +285,7 @@ nameBtn.addEventListener('click', function() {
   else toast('没名字，别人看你还是默认名');
   if (joined) {
     bcast({ t: 'who', id: peer.id, n: myName, u: myNum, img: myImgData });
-    bcast({ t: 'pos', x: me.x, y: me.y, n: myName, u: myNum, w: W, h: H, gy: gy });
+    bcast(posPayload());
   }
 });
 
@@ -293,7 +311,7 @@ function joinRoom(rid, save) {
   joined = true;
 
   var hostId = rid2pid(rid);
-  peer = new Peer(hostId, { debug: 0 });
+  peer = new Peer(hostId, { debug: 0, config: iceCfg });
 
   peer.on('open', function() {
     isHost = true;
@@ -310,7 +328,7 @@ function joinRoom(rid, save) {
     if (err.type === 'unavailable-id') {
       try { peer.destroy(); } catch(e) {}
       peer = null;
-      peer = new Peer({ debug: 0 });
+      peer = new Peer({ debug: 0, config: iceCfg });
       peer.on('open', function() {
         isHost = false;
         peer.on('connection', onConn);
@@ -351,7 +369,7 @@ function wire(c) {
     conns[c.peer] = c;
 
     c.send({ t: 'who', id: peer.id, n: myName, u: myNum, img: myImgData });
-    c.send({ t: 'pos', x: me.x, y: me.y, n: myName, u: myNum, w: W, h: H, gy: gy });
+    c.send(posPayload());
 
     if (isHost) {
       seq++;
@@ -392,21 +410,32 @@ function onData(d, c) {
   }
 
   else if (d.t === 'pos') {
-    var sx = num(d.x, null);
-    var sy = num(d.y, null);
-    if (sx === null || sy === null) return;
     var p = ensureOther(c.peer, { n: d.n, u: d.u });
     if (!p) return;
-    var sw = num(d.w, W), sh = num(d.h, H), sgy = num(d.gy, sh*0.7);
-    if (sw <= 0) sw = W;
-    if (sh <= 0) sh = H;
-    var nx = sx * W / sw;
-    var ny = gy - (sgy - sy) * H / sh;
-    if (!isFinite(nx)) nx = W/2;
+
+    var nx, ny;
+    if (typeof d.xr === 'number' && typeof d.yr === 'number') {
+      nx = d.xr * W;
+      ny = d.yr * H;
+    } else {
+      var sx = num(d.x, null);
+      var sy = num(d.y, null);
+      if (sx === null || sy === null) return;
+      var sw = num(d.w, W);
+      var sh = num(d.h, H);
+      var sgy = num(d.gy, sh * 0.7);
+      if (sw <= 0) sw = W;
+      if (sh <= 0) sh = H;
+      nx = sx * W / sw;
+      ny = gy - (sgy - sy) * H / sh;
+    }
+
+    if (!isFinite(nx)) nx = W / 2;
     if (!isFinite(ny)) ny = gy;
     if (ny > gy) ny = gy;
     if (ny < -H) ny = -H;
     nx = clamp(nx, pw/2, W - pw/2);
+
     p.x = nx;
     p.y = ny;
     refreshTag(p, false);
@@ -548,7 +577,7 @@ function loop(now) {
 
   draw(me);
   if (joined && Object.keys(conns).length > 0) {
-    bcast({ t: 'pos', x: me.x, y: me.y, n: myName, u: myNum, w: W, h: H, gy: gy });
+    bcast(posPayload());
   }
 
   for (var id in others) draw(others[id]);
