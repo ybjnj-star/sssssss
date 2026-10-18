@@ -3,7 +3,11 @@ var gy = H * 0.7;
 var pw = 110;
 var g = 0.6, spd = 4, jv = -13;
 var flyT = 150, flyP = -0.5;
-var maxP = 10;
+
+var SUPABASE_URL = 'https://eecsrjjfjypwzgqbjtdw.supabase.co';
+var SUPABASE_KEY = 'sb_publishable_FNMKaMMEoT9CMCpw39Ir1A_T5INh3SV';
+var sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+var channel = null;
 
 var world = document.getElementById('world');
 var ground = document.getElementById('ground');
@@ -26,25 +30,12 @@ var jumpBtn = document.getElementById('jumpBtn');
 var toastEl = document.getElementById('toast');
 
 var me = null;
-var peer = null;
 var myRoom = '';
 var myName = '';
-var myNum = 1;
-var isHost = false;
-var joined = false;
-var seq = 1;
+var myId = 'u' + Math.random().toString(36).substring(2, 8);
 var others = {};
-var conns = {};
 var myImgData = '';
 var fallbackImg = '';
-
-var iceCfg = {
-  iceServers: [
-    { urls: 'stun:stun.miwifi.com:3478' },
-    { urls: 'stun:stun.chat.bilibili.com:3478' },
-    { urls: 'stun:stun.qq.com:3478' }
-  ]
-};
 
 var savedName = localStorage.getItem('bb_name');
 if (savedName) { myName = savedName; nameInput.value = savedName; }
@@ -80,7 +71,6 @@ function sfxJoin() { beep(660, 0.12, 0.08); setTimeout(function(){ beep(880, 0.1
 function sfxLeave() { beep(500, 0.12, 0.08); setTimeout(function(){ beep(330, 0.15, 0.08); }, 100); }
 
 function clamp(v,a,b) { return v<a?a:(v>b?b:v); }
-function num(v, def) { return (typeof v === 'number' && isFinite(v)) ? v : def; }
 
 function makeFallback() {
   var cv = document.createElement('canvas');
@@ -147,7 +137,7 @@ function bindLoad(p) {
   };
 }
 
-function newPlayer() {
+function newPlayer(isMe) {
   var img = document.createElement('img');
   img.className = 'player';
   world.appendChild(img);
@@ -161,10 +151,11 @@ function newPlayer() {
   world.appendChild(box);
 
   var p = {
+    id: isMe ? myId : '',
     x: W/2, y: gy, vy: 0, onGround: true,
     hold: false, holdAt: 0,
     img: img, tag: tag, box: box,
-    customName: '', num: 0, seen: false, imgData: ''
+    customName: isMe ? myName : '', imgData: '', isMe: isMe
   };
   bindLoad(p);
   img.src = 'player.png';
@@ -172,19 +163,17 @@ function newPlayer() {
   return p;
 }
 
-function cn(n) {
-  var s = ['','一','二','三','四','五','六','七','八','九','十'];
-  return s[n] || n;
-}
-
-function nameOf(p, self) {
-  if (p.customName) return p.customName;
-  if (self) return '我';
-  return '用户' + cn(p.num);
-}
-
-function refreshTag(p, self) {
-  p.tag.textContent = nameOf(p, self);
+function refreshTag(p) {
+  var txt = p.customName;
+  if (!txt) {
+    if (p.isMe) txt = '我';
+    else {
+      var nums = ['一','二','三','四','五','六','七','八','九','十'];
+      var idx = Object.keys(others).indexOf(p.id) + 1;
+      txt = '用户' + (nums[idx] || idx);
+    }
+  }
+  p.tag.textContent = txt;
 }
 
 function applyImg(p, data) {
@@ -196,39 +185,8 @@ function applyImg(p, data) {
   draw(p);
 }
 
-function ensureOther(id, info) {
-  if (!peer || id === peer.id) return null;
-  if (!others[id]) {
-    var np = newPlayer();
-    others[id] = np;
-    sfxJoin();
-  }
-  var p = others[id];
-  if (info) {
-    if (info.n !== undefined) p.customName = info.n || '';
-    if (info.u) p.num = info.u;
-    if (info.img) applyImg(p, info.img);
-    refreshTag(p, false);
-  }
-  p.seen = true;
-  upCount();
-  return p;
-}
-
-function posPayload() {
-  return {
-    t: 'pos',
-    xr: me.x / W,
-    yr: me.y / H,
-    n: myName,
-    u: myNum
-  };
-}
-
-me = newPlayer();
-me.num = 1;
-me.customName = myName;
-refreshTag(me, true);
+me = newPlayer(true);
+refreshTag(me);
 
 var joy = false, jx = 0, jy = 0, dx = 0;
 var JR = 40;
@@ -280,20 +238,13 @@ nameBtn.addEventListener('click', function() {
   myName = n;
   localStorage.setItem('bb_name', n);
   me.customName = n;
-  refreshTag(me, true);
+  refreshTag(me);
   if (n) toast('名字：' + n);
   else toast('没名字，别人看你还是默认名');
-  if (joined) {
-    bcast({ t: 'who', id: peer.id, n: myName, u: myNum, img: myImgData });
-    bcast(posPayload());
+  if (channel) {
+    channel.send({ type: 'broadcast', event: 'who', payload: { id: myId, n: myName, img: myImgData } });
   }
 });
-
-function rid2pid(r) {
-  var h = 5381;
-  for (var i = 0; i < r.length; i++) h = ((h << 5) + h + r.charCodeAt(i)) | 0;
-  return 'r' + Math.abs(h).toString(36) + 'h';
-}
 
 function newRoomId() {
   var s = '';
@@ -303,175 +254,93 @@ function newRoomId() {
 }
 
 function joinRoom(rid, save) {
-  if (joined) leaveRoom();
-  myRoom = rid;
-  myRoomInput.value = rid;
-  if (save) localStorage.setItem('bb_room', rid);
-  countLabel.textContent = '1';
-  joined = true;
-
-  var hostId = rid2pid(rid);
-  peer = new Peer(hostId, { debug: 0, config: iceCfg });
-
-  peer.on('open', function() {
-    isHost = true;
-    myNum = 1;
-    seq = 1;
-    me.num = 1;
-    refreshTag(me, true);
-    toast('进房了，你是房主：' + rid);
-    peer.on('connection', onConn);
-    upCount();
-  });
-
-  peer.on('error', function(err) {
-    if (err.type === 'unavailable-id') {
-      try { peer.destroy(); } catch(e) {}
-      peer = null;
-      peer = new Peer({ debug: 0, config: iceCfg });
-      peer.on('open', function() {
-        isHost = false;
-        peer.on('connection', onConn);
-        wire(peer.connect(hostId, { reliable: true }));
-        toast('进房了：' + rid);
-      });
-      peer.on('error', function(e2) {
-        if (e2.type === 'peer-unavailable') toast('房间不存在或房主不在');
-        else toast('连不上：' + e2.type);
-      });
-    } else {
-      toast('出错：' + err.type);
-    }
-  });
-}
-
-function leaveRoom() {
-  if (peer) { try { peer.destroy(); } catch(e){} peer = null; }
-  for (var id in conns) delete conns[id];
+  if (channel) {
+    sb.removeChannel(channel);
+    channel = null;
+  }
   for (var id in others) {
     others[id].img.remove();
     others[id].tag.remove();
     others[id].box.remove();
     delete others[id];
   }
-  joined = false;
-  isHost = false;
-}
+  upCount();
 
-function onConn(c) {
-  if (Object.keys(conns).length >= maxP - 1) { c.close(); return; }
-  wire(c);
-}
+  myRoom = rid;
+  myRoomInput.value = rid;
+  if (save) localStorage.setItem('bb_room', rid);
 
-function wire(c) {
-  c.on('open', function() {
-    if (conns[c.peer]) return;
-    conns[c.peer] = c;
-
-    c.send({ t: 'who', id: peer.id, n: myName, u: myNum, img: myImgData });
-    c.send(posPayload());
-
-    if (isHost) {
-      seq++;
-      var newNum = seq;
-      var list = [{ id: peer.id, n: myName, u: 1, img: myImgData }];
-      for (var id in others) {
-        if (id === c.peer) continue;
-        list.push({ id: id, n: others[id].customName, u: others[id].num, img: others[id].imgData || '' });
-      }
-      c.send({ t: 'hi', u: newNum, list: list });
-    }
-    upCount();
+  channel = sb.channel('room_' + rid, {
+    config: { broadcast: { self: false } }
   });
-  c.on('data', function(d) { onData(d, c); });
-  c.on('close', function() { drop(c.peer); });
-  c.on('error', function() { drop(c.peer); });
-}
 
-function onData(d, c) {
-  if (!d || !d.t) return;
-
-  if (d.t === 'who') {
-    ensureOther(d.id || c.peer, { n: d.n, u: d.u, img: d.img });
-  }
-
-  else if (d.t === 'hi') {
-    if (d.u) { myNum = d.u; me.num = myNum; refreshTag(me, true); }
-    (d.list || []).forEach(function(item) {
-      if (item.id === peer.id) return;
-      ensureOther(item.id, item);
-      if (!conns[item.id]) {
-        wire(peer.connect(item.id, { reliable: true }));
+  channel
+    .on('broadcast', { event: 'who' }, function(payload) {
+      var d = payload.payload;
+      if (d.id === myId) return;
+      if (!others[d.id]) {
+        others[d.id] = newPlayer(false);
+        others[d.id].id = d.id;
+        sfxJoin();
+      }
+      others[d.id].customName = d.n || '';
+      applyImg(others[d.id], d.img);
+      refreshTag(others[d.id]);
+      upCount();
+      
+      channel.send({ type: 'broadcast', event: 'who', payload: { id: myId, n: myName, img: myImgData } });
+    })
+    .on('broadcast', { event: 'pos' }, function(payload) {
+      var d = payload.payload;
+      if (d.id === myId) return;
+      if (!others[d.id]) {
+        others[d.id] = newPlayer(false);
+        others[d.id].id = d.id;
+        sfxJoin();
+        channel.send({ type: 'broadcast', event: 'who', payload: { id: myId, n: myName, img: myImgData } });
+      }
+      var p = others[d.id];
+      p.x = d.xr * W;
+      p.y = d.yr * H;
+      p.x = clamp(p.x, pw/2, W - pw/2);
+      if (!p.customName && d.n) {
+        p.customName = d.n;
+        refreshTag(p);
+      }
+    })
+    .on('broadcast', { event: 'say' }, function(payload) {
+      var d = payload.payload;
+      if (d.id === myId) return;
+      if (others[d.id]) addBubble(others[d.id], d.text);
+    })
+    .on('broadcast', { event: 'img' }, function(payload) {
+      var d = payload.payload;
+      if (d.id === myId) return;
+      if (others[d.id]) applyImg(others[d.id], d.data);
+    })
+    .on('broadcast', { event: 'leave' }, function(payload) {
+      var d = payload.payload;
+      if (d.id === myId) return;
+      if (others[d.id]) {
+        others[d.id].img.remove();
+        others[d.id].tag.remove();
+        others[d.id].box.remove();
+        delete others[d.id];
+        sfxLeave();
+        upCount();
       }
     });
-    if (conns[c.peer]) {
-      conns[c.peer].send({ t: 'who', id: peer.id, n: myName, u: myNum, img: myImgData });
+
+  channel.subscribe(function(status) {
+    if (status === 'SUBSCRIBED') {
+      toast('进房了：' + rid);
+      channel.send({ type: 'broadcast', event: 'who', payload: { id: myId, n: myName, img: myImgData } });
     }
-  }
-
-  else if (d.t === 'pos') {
-    var p = ensureOther(c.peer, { n: d.n, u: d.u });
-    if (!p) return;
-
-    var nx, ny;
-    if (typeof d.xr === 'number' && typeof d.yr === 'number') {
-      nx = d.xr * W;
-      ny = d.yr * H;
-    } else {
-      var sx = num(d.x, null);
-      var sy = num(d.y, null);
-      if (sx === null || sy === null) return;
-      var sw = num(d.w, W);
-      var sh = num(d.h, H);
-      var sgy = num(d.gy, sh * 0.7);
-      if (sw <= 0) sw = W;
-      if (sh <= 0) sh = H;
-      nx = sx * W / sw;
-      ny = gy - (sgy - sy) * H / sh;
-    }
-
-    if (!isFinite(nx)) nx = W / 2;
-    if (!isFinite(ny)) ny = gy;
-    if (ny > gy) ny = gy;
-    if (ny < -H) ny = -H;
-    nx = clamp(nx, pw/2, W - pw/2);
-
-    p.x = nx;
-    p.y = ny;
-    refreshTag(p, false);
-  }
-
-  else if (d.t === 'say') {
-    var p = ensureOther(c.peer, null);
-    if (p) addBubble(p, d.text);
-  }
-
-  else if (d.t === 'img') {
-    var p = ensureOther(c.peer, null);
-    if (p) applyImg(p, d.data);
-  }
-}
-
-function drop(id) {
-  if (conns[id]) delete conns[id];
-  if (others[id]) {
-    others[id].img.remove();
-    others[id].tag.remove();
-    others[id].box.remove();
-    delete others[id];
-    sfxLeave();
-  }
-  upCount();
+  });
 }
 
 function upCount() {
   countLabel.textContent = String(Object.keys(others).length + 1);
-}
-
-function bcast(o) {
-  for (var id in conns) {
-    try { conns[id].send(o); } catch(e) {}
-  }
 }
 
 function addBubble(p, text) {
@@ -487,15 +356,14 @@ function say() {
   if (!t) { toast('先打字'); return; }
   chatInput.value = '';
   addBubble(me, t);
-  bcast({ t: 'say', text: t });
+  if (channel) {
+    channel.send({ type: 'broadcast', event: 'say', payload: { id: myId, text: t } });
+  }
   chatInput.blur();
 }
 sendBtn.addEventListener('click', say);
 chatInput.addEventListener('keydown', function(e) {
   if (e.key === 'Enter') { e.preventDefault(); say(); }
-});
-chatInput.addEventListener('keyup', function(e) {
-  if (e.keyCode === 13) { e.preventDefault(); say(); }
 });
 
 copyBtn.addEventListener('click', function() {
@@ -551,7 +419,9 @@ imgInput.addEventListener('change', function() {
       bindLoad(me);
       me.img.src = data;
       draw(me);
-      bcast({ t: 'img', data: data });
+      if (channel) {
+        channel.send({ type: 'broadcast', event: 'img', payload: { id: myId, data: data } });
+      }
       toast('换了');
     };
     im.src = ev.target.result;
@@ -560,6 +430,7 @@ imgInput.addEventListener('change', function() {
 });
 
 var last = performance.now();
+var lastPosTime = 0;
 function loop(now) {
   var dt = now - last;
   if (dt > 50) dt = 50;
@@ -576,14 +447,25 @@ function loop(now) {
   else me.onGround = false;
 
   draw(me);
-  if (joined && Object.keys(conns).length > 0) {
-    bcast(posPayload());
+
+  if (channel && now - lastPosTime > 50) {
+    lastPosTime = now;
+    channel.send({
+      type: 'broadcast', event: 'pos',
+      payload: { id: myId, xr: me.x / W, yr: me.y / H, n: myName }
+    });
   }
 
   for (var id in others) draw(others[id]);
 
   requestAnimationFrame(loop);
 }
+
+window.addEventListener('beforeunload', function() {
+  if (channel) {
+    channel.send({ type: 'broadcast', event: 'leave', payload: { id: myId } });
+  }
+});
 
 fit();
 requestAnimationFrame(loop);
