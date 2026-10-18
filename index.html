@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>——</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+</head>
+<body>
+
+<div id="world">
+  <div id="ground"></div>
+</div>
+
+<div id="menuBtn"></div>
+
+<div id="panelMask"></div>
+<div id="panel">
+  <div class="panel-title">设置</div>
+
+  <div class="panel-label">名字</div>
+  <div class="panel-row">
+    <input id="nameInput" placeholder="可以不设" maxlength="8" enterkeyhint="done">
+    <button id="nameBtn">确认</button>
+  </div>
+
+  <div class="panel-label">我的房间</div>
+  <div class="panel-row">
+    <input id="myRoomInput" readonly>
+    <button id="copyBtn">复制</button>
+  </div>
+
+  <div class="panel-label">加入房间</div>
+  <div class="panel-row">
+    <input id="joinRoomInput" placeholder="房间ID" maxlength="20" enterkeyhint="go">
+    <button id="joinBtn">加入</button>
+  </div>
+
+  <div class="panel-info">人数：<span id="countLabel">1</span></div>
+
+  <div class="panel-label">换角色图片</div>
+  <div class="panel-row">
+    <input id="imgInput" type="file" accept="image/*">
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<div id="joystickBase"><div id="joystickKnob"></div></div>
+<div id="jumpBtn">跳</div>
+
+<div id="chatbar">
+  <input id="chatInput" placeholder="打字..." maxlength="40" enterkeyhint="send">
+  <button id="sendBtn">发</button>
+</div>
+
+<script src="game.js"></script>
+</body>
+</html>
