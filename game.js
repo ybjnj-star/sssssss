@@ -3,11 +3,7 @@ var gy = H * 0.7;
 var pw = 110;
 var g = 0.6, spd = 4, jv = -13;
 var flyT = 150, flyP = -0.5;
-
-var SUPABASE_URL = 'https://eecsrjjfjypwzgqbjtdw.supabase.co';
-var SUPABASE_KEY = 'sb_publishable_FNMKaMMEoT9CMCpw39Ir1A_T5INh3SV';
-var sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-var channel = null;
+var maxP = 10;
 
 var world = document.getElementById('world');
 var ground = document.getElementById('ground');
@@ -36,6 +32,7 @@ var myId = 'u' + Math.random().toString(36).substring(2, 8);
 var others = {};
 var myImgData = '';
 var fallbackImg = '';
+var client = null;
 
 var savedName = localStorage.getItem('bb_name');
 if (savedName) { myName = savedName; nameInput.value = savedName; }
@@ -241,8 +238,8 @@ nameBtn.addEventListener('click', function() {
   refreshTag(me);
   if (n) toast('名字：' + n);
   else toast('没名字，别人看你还是默认名');
-  if (channel) {
-    channel.send({ type: 'broadcast', event: 'who', payload: { id: myId, n: myName, img: myImgData } });
+  if (client && client.connected) {
+    mqttPub('who', { id: myId, n: myName, img: myImgData });
   }
 });
 
@@ -253,10 +250,17 @@ function newRoomId() {
   return s;
 }
 
+function mqttPub(type, data) {
+  if (!client || !client.connected) return;
+  data.type = type;
+  data.from = myId;
+  client.publish('bb_room_' + myRoom, JSON.stringify(data));
+}
+
 function joinRoom(rid, save) {
-  if (channel) {
-    sb.removeChannel(channel);
-    channel = null;
+  if (client) {
+    try { client.end(); } catch(e){}
+    client = null;
   }
   for (var id in others) {
     others[id].img.remove();
@@ -270,72 +274,79 @@ function joinRoom(rid, save) {
   myRoomInput.value = rid;
   if (save) localStorage.setItem('bb_room', rid);
 
-  channel = sb.channel('room_' + rid, {
-    config: { broadcast: { self: false } }
-  });
+  var host = 'wss://broker.emqx.io:8084/mqtt';
+  var opts = {
+    clientId: 'bb_' + myId + '_' + Math.floor(Math.random()*1000),
+    clean: true,
+    connectTimeout: 4000,
+    reconnectPeriod: 2000
+  };
 
-  channel
-    .on('broadcast', { event: 'who' }, function(payload) {
-      var d = payload.payload;
-      if (d.id === myId) return;
-      if (!others[d.id]) {
-        others[d.id] = newPlayer(false);
-        others[d.id].id = d.id;
-        sfxJoin();
-      }
-      others[d.id].customName = d.n || '';
-      applyImg(others[d.id], d.img);
-      refreshTag(others[d.id]);
-      upCount();
-      
-      channel.send({ type: 'broadcast', event: 'who', payload: { id: myId, n: myName, img: myImgData } });
-    })
-    .on('broadcast', { event: 'pos' }, function(payload) {
-      var d = payload.payload;
-      if (d.id === myId) return;
-      if (!others[d.id]) {
-        others[d.id] = newPlayer(false);
-        others[d.id].id = d.id;
-        sfxJoin();
-        channel.send({ type: 'broadcast', event: 'who', payload: { id: myId, n: myName, img: myImgData } });
-      }
-      var p = others[d.id];
-      p.x = d.xr * W;
-      p.y = d.yr * H;
-      p.x = clamp(p.x, pw/2, W - pw/2);
-      if (!p.customName && d.n) {
-        p.customName = d.n;
-        refreshTag(p);
-      }
-    })
-    .on('broadcast', { event: 'say' }, function(payload) {
-      var d = payload.payload;
-      if (d.id === myId) return;
-      if (others[d.id]) addBubble(others[d.id], d.text);
-    })
-    .on('broadcast', { event: 'img' }, function(payload) {
-      var d = payload.payload;
-      if (d.id === myId) return;
-      if (others[d.id]) applyImg(others[d.id], d.data);
-    })
-    .on('broadcast', { event: 'leave' }, function(payload) {
-      var d = payload.payload;
-      if (d.id === myId) return;
-      if (others[d.id]) {
-        others[d.id].img.remove();
-        others[d.id].tag.remove();
-        others[d.id].box.remove();
-        delete others[d.id];
-        sfxLeave();
-        upCount();
+  client = mqtt.connect(host, opts);
+
+  client.on('connect', function() {
+    toast('进房了：' + rid);
+    client.subscribe('bb_room_' + myRoom, function(err) {
+      if (!err) {
+        mqttPub('who', { id: myId, n: myName, img: myImgData });
       }
     });
+  });
 
-  channel.subscribe(function(status) {
-    if (status === 'SUBSCRIBED') {
-      toast('进房了：' + rid);
-      channel.send({ type: 'broadcast', event: 'who', payload: { id: myId, n: myName, img: myImgData } });
-    }
+  client.on('message', function(topic, message) {
+    try {
+      var d = JSON.parse(message.toString());
+      if (d.from === myId) return;
+      
+      if (d.type === 'who') {
+        if (!others[d.id]) {
+          others[d.id] = newPlayer(false);
+          others[d.id].id = d.id;
+          sfxJoin();
+        }
+        others[d.id].customName = d.n || '';
+        applyImg(others[d.id], d.img);
+        refreshTag(others[d.id]);
+        upCount();
+        mqttPub('who', { id: myId, n: myName, img: myImgData });
+      }
+      
+      else if (d.type === 'pos') {
+        if (!others[d.id]) {
+          others[d.id] = newPlayer(false);
+          others[d.id].id = d.id;
+          sfxJoin();
+          mqttPub('who', { id: myId, n: myName, img: myImgData });
+        }
+        var p = others[d.id];
+        p.x = d.xr * W;
+        p.y = d.yr * H;
+        p.x = clamp(p.x, pw/2, W - pw/2);
+        if (!p.customName && d.n) {
+          p.customName = d.n;
+          refreshTag(p);
+        }
+      }
+      
+      else if (d.type === 'say') {
+        if (others[d.id]) addBubble(others[d.id], d.text);
+      }
+      
+      else if (d.type === 'img') {
+        if (others[d.id]) applyImg(others[d.id], d.data);
+      }
+      
+      else if (d.type === 'leave') {
+        if (others[d.id]) {
+          others[d.id].img.remove();
+          others[d.id].tag.remove();
+          others[d.id].box.remove();
+          delete others[d.id];
+          sfxLeave();
+          upCount();
+        }
+      }
+    } catch(e) {}
   });
 }
 
@@ -356,9 +367,7 @@ function say() {
   if (!t) { toast('先打字'); return; }
   chatInput.value = '';
   addBubble(me, t);
-  if (channel) {
-    channel.send({ type: 'broadcast', event: 'say', payload: { id: myId, text: t } });
-  }
+  mqttPub('say', { id: myId, text: t });
   chatInput.blur();
 }
 sendBtn.addEventListener('click', say);
@@ -419,9 +428,7 @@ imgInput.addEventListener('change', function() {
       bindLoad(me);
       me.img.src = data;
       draw(me);
-      if (channel) {
-        channel.send({ type: 'broadcast', event: 'img', payload: { id: myId, data: data } });
-      }
+      mqttPub('img', { id: myId, data: data });
       toast('换了');
     };
     im.src = ev.target.result;
@@ -448,12 +455,9 @@ function loop(now) {
 
   draw(me);
 
-  if (channel && now - lastPosTime > 50) {
+  if (now - lastPosTime > 50) {
     lastPosTime = now;
-    channel.send({
-      type: 'broadcast', event: 'pos',
-      payload: { id: myId, xr: me.x / W, yr: me.y / H, n: myName }
-    });
+    mqttPub('pos', { xr: me.x / W, yr: me.y / H, n: myName });
   }
 
   for (var id in others) draw(others[id]);
@@ -462,8 +466,8 @@ function loop(now) {
 }
 
 window.addEventListener('beforeunload', function() {
-  if (channel) {
-    channel.send({ type: 'broadcast', event: 'leave', payload: { id: myId } });
+  if (client && client.connected) {
+    mqttPub('leave', { id: myId });
   }
 });
 
